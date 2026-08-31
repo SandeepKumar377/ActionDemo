@@ -54,6 +54,7 @@ jobs:
           WEBSITE_PATH: ${{ vars.WEBSITE_PATH }}
           BACKUP_PATH: ${{ vars.BACKUP_PATH }}
           BUILD_OUTPUT_PATH: ${{ vars.BUILD_OUTPUT_PATH }}
+          SITE_URL: ${{ vars.SITE_URL }}
         run: |
           $ErrorActionPreference = "Stop"
           Import-Module WebAdministration
@@ -138,20 +139,46 @@ jobs:
             robocopy $buildOutput $env:WEBSITE_PATH /MIR /XF web.config /NFL /NDL /NJH /NJS /NC /NS
             if ($LASTEXITCODE -ge 8) { throw "Deployment robocopy failed with exit code $LASTEXITCODE" }
             $global:LASTEXITCODE = 0   # robocopy codes 0-7 are success; clear so it doesn't leak into the step's exit code
+
+            # 5. Start the app pool and site again (with retry in case WAS isn't immediately ready)
+            Write-Host "Starting app pool $appPoolName and site $env:SITE_NAME..."
+            Start-IISObjectWithRetry -Action { Start-WebAppPool -Name $appPoolName } -Description "start app pool '$appPoolName'"
+            Start-IISObjectWithRetry -Action { Start-Website -Name $env:SITE_NAME } -Description "start site '$($env:SITE_NAME)'"
+
+            # 6. Post-deploy health check - if the site doesn't respond OK, treat it as a failed deployment
+            if ([string]::IsNullOrWhiteSpace($env:SITE_URL)) {
+              Write-Host "SITE_URL not set - skipping health check."
+            } else {
+              Write-Host "Running post-deploy health check against $env:SITE_URL ..."
+              $healthy = $false
+              for ($i = 1; $i -le 5; $i++) {
+                try {
+                  $response = Invoke-WebRequest -Uri $env:SITE_URL -UseBasicParsing -TimeoutSec 15
+                  if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 400) {
+                    Write-Host "Health check passed on attempt $i (status $($response.StatusCode))."
+                    $healthy = $true
+                    break
+                  } else {
+                    Write-Host "Health check attempt $i got unexpected status $($response.StatusCode)."
+                  }
+                } catch {
+                  Write-Host "Health check attempt $i failed: $_"
+                }
+                Start-Sleep -Seconds 3
+              }
+              if (-not $healthy) {
+                throw "Post-deploy health check failed after 5 attempts - site did not respond successfully at $env:SITE_URL"
+              }
+            }
           }
           catch {
-            Write-Host "Deployment failed: $_"
+            Write-Host "Deployment or health check failed: $_"
             Write-Host "Rolling back to backup at $backupFolder ..."
             robocopy $backupFolder $env:WEBSITE_PATH /MIR /XF web.config /NFL /NDL /NJH /NJS /NC /NS
             Start-IISObjectWithRetry -Action { Start-WebAppPool -Name $appPoolName } -Description "start app pool '$appPoolName' after rollback"
             Start-IISObjectWithRetry -Action { Start-Website -Name $env:SITE_NAME } -Description "start site '$($env:SITE_NAME)' after rollback"
-            throw "Deployment failed and was rolled back. See error above."
+            throw "Deployment failed (build/copy or health check) and was rolled back. See error above."
           }
-
-          # 5. Start the app pool and site again (with retry in case WAS isn't immediately ready)
-          Write-Host "Starting app pool $appPoolName and site $env:SITE_NAME..."
-          Start-IISObjectWithRetry -Action { Start-WebAppPool -Name $appPoolName } -Description "start app pool '$appPoolName'"
-          Start-IISObjectWithRetry -Action { Start-Website -Name $env:SITE_NAME } -Description "start site '$($env:SITE_NAME)'"
 
           Write-Host "Deployment complete."
           exit 0
