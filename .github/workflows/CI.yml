@@ -17,6 +17,10 @@ jobs:
     runs-on: self-hosted
     timeout-minutes: 15
 
+    # Change "Development" to whatever your GitHub Environment is actually named
+    # (needed here because BUILD_OUTPUT_PATH is an Environment variable)
+    environment: Development
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -25,7 +29,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22.22.0'   # Angular 21 requires Node 22.22.0+ (or 24.13.1+)
-          cache: 'npm'
 
       - name: Install dependencies
         run: npm ci
@@ -35,10 +38,18 @@ jobs:
 
       - name: Fail fast if build output is empty
         shell: powershell
+        env:
+          BUILD_OUTPUT_PATH: ${{ vars.BUILD_OUTPUT_PATH }}
         run: |
-          # Adjust buildOutput to match the "outputPath" folder name in angular.json
-          $buildOutput = "dist\ActionDemo"
+          $buildOutput = $env:BUILD_OUTPUT_PATH
           if (-not (Test-Path $buildOutput) -or (Get-ChildItem $buildOutput -Recurse -File | Measure-Object).Count -eq 0) {
             throw "Build output '$buildOutput' is missing or empty - failing CI."
           }
           Write-Host "Build output verified at $buildOutput"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: angular-build
+          path: ${{ vars.BUILD_OUTPUT_PATH }}
+          retention-days: 5
