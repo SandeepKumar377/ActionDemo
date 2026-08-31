@@ -1,0 +1,44 @@
+name: CI - Environment Neutral
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:   # allows manually running CI on demand
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: self-hosted
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.0'   # Angular 21 requires Node 22.22.0+ (or 24.13.1+)
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Angular app
+        run: npm run build
+
+      - name: Fail fast if build output is empty
+        shell: powershell
+        run: |
+          # Adjust "your-app-name" to match the "outputPath" folder name in angular.json
+          $buildOutput = "dist\your-app-name"
+          if (-not (Test-Path $buildOutput) -or (Get-ChildItem $buildOutput -Recurse -File | Measure-Object).Count -eq 0) {
+            throw "Build output '$buildOutput' is missing or empty - failing CI."
+          }
+          Write-Host "Build output verified at $buildOutput"
