@@ -1,0 +1,110 @@
+name: CD - deploy IIS
+
+on:
+  workflow_run:
+    workflows: ["CI"]        # runs after the CI workflow finishes
+    types:
+      - completed
+    branches:
+      - main
+  workflow_dispatch:         # allows manually triggering a deployment
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    # Only deploy if CI succeeded, or if this was triggered manually
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: self-hosted
+    timeout-minutes: 15
+
+    # Change "Development" to whatever your GitHub Environment is actually named
+    environment: Development
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.0'   # Angular 21 requires Node 22.22.0+ (or 24.13.1+)
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Angular app
+        run: npm run build
+
+      - name: Backup current site, deploy new build, keep web.config
+        shell: powershell
+        env:
+          SITE_NAME: ${{ vars.SITE_NAME }}
+          WEBSITE_PATH: ${{ vars.WEBSITE_PATH }}
+          BACKUP_PATH: ${{ vars.BACKUP_PATH }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          Import-Module WebAdministration
+
+          # Adjust "your-app-name" to match the "outputPath" folder name in angular.json
+          $buildOutput = "dist\your-app-name"
+
+          # Fail fast if the build didn't actually produce output
+          if (-not (Test-Path $buildOutput) -or (Get-ChildItem $buildOutput -Recurse -File | Measure-Object).Count -eq 0) {
+            throw "Build output '$buildOutput' is missing or empty - aborting before touching the live site."
+          }
+
+          $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+          $backupFolder = Join-Path $env:BACKUP_PATH "$($env:SITE_NAME)_$timestamp"
+
+          # 1. Back up the currently deployed site
+          Write-Host "Backing up current site to $backupFolder ..."
+          New-Item -ItemType Directory -Path $backupFolder -Force | Out-Null
+          robocopy $env:WEBSITE_PATH $backupFolder /E /NFL /NDL /NJH /NJS /NC /NS
+          if ($LASTEXITCODE -ge 8) { throw "Backup robocopy failed with exit code $LASTEXITCODE" }
+          Write-Host "Backup complete."
+
+          # 2. Keep only the latest 5 backups for this site, delete older ones
+          Write-Host "Cleaning up old backups (keeping latest 5)..."
+          Get-ChildItem -Path $env:BACKUP_PATH -Directory -Filter "$($env:SITE_NAME)_*" |
+            Sort-Object CreationTime -Descending |
+            Select-Object -Skip 5 |
+            ForEach-Object {
+              Write-Host "Removing old backup: $($_.FullName)"
+              Remove-Item -Path $_.FullName -Recurse -Force
+            }
+
+          # Find the app pool backing this site, so we can stop/start it alongside the site
+          $appPoolName = (Get-Website -Name $env:SITE_NAME).applicationPool
+
+          # 3. Stop the site and its app pool before replacing files (releases file locks)
+          Write-Host "Stopping site $env:SITE_NAME and app pool $appPoolName..."
+          Stop-Website -Name $env:SITE_NAME -ErrorAction SilentlyContinue
+          Stop-WebAppPool -Name $appPoolName -ErrorAction SilentlyContinue
+
+          try {
+            # 4. Deploy new build, mirroring the folder but excluding web.config entirely
+            #    (existing web.config on the server is left untouched)
+            Write-Host "Deploying new build to $env:WEBSITE_PATH ..."
+            robocopy $buildOutput $env:WEBSITE_PATH /MIR /XF web.config /NFL /NDL /NJH /NJS /NC /NS
+            if ($LASTEXITCODE -ge 8) { throw "Deployment robocopy failed with exit code $LASTEXITCODE" }
+          }
+          catch {
+            Write-Host "Deployment failed: $_"
+            Write-Host "Rolling back to backup at $backupFolder ..."
+            robocopy $backupFolder $env:WEBSITE_PATH /MIR /XF web.config /NFL /NDL /NJH /NJS /NC /NS
+            Start-WebAppPool -Name $appPoolName -ErrorAction SilentlyContinue
+            Start-Website -Name $env:SITE_NAME -ErrorAction SilentlyContinue
+            throw "Deployment failed and was rolled back. See error above."
+          }
+
+          # 5. Start the app pool and site again
+          Write-Host "Starting app pool $appPoolName and site $env:SITE_NAME..."
+          Start-WebAppPool -Name $appPoolName
+          Start-Website -Name $env:SITE_NAME
+
+          Write-Host "Deployment complete."
