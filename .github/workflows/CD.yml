@@ -9,6 +9,9 @@ on:
       - main
   workflow_dispatch:         # allows manually triggering a deployment
 
+env:
+  BUILD_OUTPUT_PATH: dist/ActionDemo   # match the "outputPath" folder name in angular.json
+
 permissions:
   contents: read
   actions: read             # required to download an artifact from another workflow run
@@ -32,7 +35,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: angular-build
-          path: dist/your-app-name   # match the same outputPath used in CI
+          path: ${{ env.BUILD_OUTPUT_PATH }}
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -61,12 +64,12 @@ jobs:
           SITE_NAME: ${{ vars.SITE_NAME }}
           WEBSITE_PATH: ${{ vars.WEBSITE_PATH }}
           BACKUP_PATH: ${{ vars.BACKUP_PATH }}
+          BUILD_OUTPUT_PATH: ${{ env.BUILD_OUTPUT_PATH }}
         run: |
           $ErrorActionPreference = "Stop"
           Import-Module WebAdministration
 
-          # Adjust "your-app-name" to match the "outputPath" folder name in angular.json
-          $buildOutput = "dist\your-app-name"
+          $buildOutput = $env:BUILD_OUTPUT_PATH
 
           # Fail fast if the build output isn't there (covers both artifact download and rebuild paths)
           if (-not (Test-Path $buildOutput) -or (Get-ChildItem $buildOutput -Recurse -File | Measure-Object).Count -eq 0) {
