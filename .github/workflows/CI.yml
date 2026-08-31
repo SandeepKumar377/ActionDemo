@@ -53,3 +53,20 @@ jobs:
           name: angular-build
           path: ${{ vars.BUILD_OUTPUT_PATH }}
           retention-days: 5
+
+      - name: CI summary
+        shell: pwsh
+        run: |
+          "## CI Build Summary" >> $env:GITHUB_STEP_SUMMARY
+          "" >> $env:GITHUB_STEP_SUMMARY
+          "| Field | Value |" >> $env:GITHUB_STEP_SUMMARY
+          "|---|---|" >> $env:GITHUB_STEP_SUMMARY
+          "| Application | ${{ github.event.repository.name }} |" >> $env:GITHUB_STEP_SUMMARY
+          "| Artifact | angular-build |" >> $env:GITHUB_STEP_SUMMARY
+          "| Run ID | ${{ github.run_id }} |" >> $env:GITHUB_STEP_SUMMARY
+          "| Run Number | ${{ github.run_number }} |" >> $env:GITHUB_STEP_SUMMARY
+          "| Commit | ${{ github.sha }} |" >> $env:GITHUB_STEP_SUMMARY
+          "| Branch | ${{ github.ref_name }} |" >> $env:GITHUB_STEP_SUMMARY
+          "| Actor | ${{ github.actor }} |" >> $env:GITHUB_STEP_SUMMARY
+          "" >> $env:GITHUB_STEP_SUMMARY
+          "> To deploy this build via CD, use **Run ID: ${{ github.run_id }}** and **Artifact: angular-build**" >> $env:GITHUB_STEP_SUMMARY
