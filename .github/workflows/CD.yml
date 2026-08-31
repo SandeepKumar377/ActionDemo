@@ -195,6 +195,7 @@ jobs:
           "| Field | Value |" >> $env:GITHUB_STEP_SUMMARY
           "|---|---|" >> $env:GITHUB_STEP_SUMMARY
           "| Site | ${{ vars.SITE_NAME }} |" >> $env:GITHUB_STEP_SUMMARY
+          "| Site URL | [${{ vars.SITE_URL }}](${{ vars.SITE_URL }}) |" >> $env:GITHUB_STEP_SUMMARY
           "| Artifact | ${{ env.DEPLOY_ARTIFACT_NAME }} |" >> $env:GITHUB_STEP_SUMMARY
           "| Source Run ID | ${{ env.DEPLOY_RUN_ID }} |" >> $env:GITHUB_STEP_SUMMARY
           "| Commit | $commit |" >> $env:GITHUB_STEP_SUMMARY
