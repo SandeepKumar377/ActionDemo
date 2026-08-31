@@ -1,16 +1,28 @@
-<table>
-  <thead>
-    <tr>
-      <th>Course Name</th>
-      <th>Course Description</th>
-    </tr>
-  </thead>
-  <tbody>
-     @for (course of courses(); track $index) {
+<nav class="top-nav" aria-label="Main navigation">
+  <div class="brand">ActionDemo</div>
+  <div class="nav-links">
+    <a href="#">Home</a>
+    <a href="#">Courses</a>
+    <a href="#">Students</a>
+    <a href="#">Reports</a>
+  </div>
+</nav>
+
+<main class="content">
+  <table>
+    <thead>
       <tr>
-        <td>{{ course.title }}</td>
-        <td>{{ course.description }}</td>
+        <th>Course Name</th>
+        <th>Course Description</th>
       </tr>
-    }
-  </tbody>
-</table>
+    </thead>
+    <tbody>
+      @for (course of courses(); track $index) {
+        <tr>
+          <td>{{ course.title }}</td>
+          <td>{{ course.description }}</td>
+        </tr>
+      }
+    </tbody>
+  </table>
+</main>
