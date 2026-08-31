@@ -37,7 +37,7 @@ jobs:
         shell: powershell
         run: |
           # Adjust "your-app-name" to match the "outputPath" folder name in angular.json
-          $buildOutput = "dist\your-app-name"
+          $buildOutput = "dist\ActionDemo"
           if (-not (Test-Path $buildOutput) -or (Get-ChildItem $buildOutput -Recurse -File | Measure-Object).Count -eq 0) {
             throw "Build output '$buildOutput' is missing or empty - failing CI."
           }
