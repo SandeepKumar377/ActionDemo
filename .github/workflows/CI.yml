@@ -55,7 +55,7 @@ jobs:
           retention-days: 5
 
       - name: CI summary
-        shell: pwsh
+        shell: powershell
         run: |
           "## CI Build Summary" >> $env:GITHUB_STEP_SUMMARY
           "" >> $env:GITHUB_STEP_SUMMARY
