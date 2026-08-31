@@ -1,4 +1,4 @@
-name: CD -Deploy IIS
+name: CD - Deploy IIS
 
 on:
   workflow_run:
@@ -58,6 +58,26 @@ jobs:
           $ErrorActionPreference = "Stop"
           Import-Module WebAdministration
 
+          function Start-IISObjectWithRetry {
+            param(
+              [scriptblock]$Action,
+              [string]$Description,
+              [int]$MaxRetries = 5,
+              [int]$DelaySeconds = 3
+            )
+            for ($i = 1; $i -le $MaxRetries; $i++) {
+              try {
+                & $Action
+                Write-Host "$Description succeeded on attempt $i."
+                return
+              } catch {
+                Write-Host "Attempt $i to $Description failed: $_"
+                if ($i -eq $MaxRetries) { throw }
+                Start-Sleep -Seconds $DelaySeconds
+              }
+            }
+          }
+
           $buildOutput = $env:BUILD_OUTPUT_PATH
 
           # Fail fast if the downloaded artifact isn't there
@@ -93,6 +113,7 @@ jobs:
           Write-Host "Stopping site $env:SITE_NAME and app pool $appPoolName..."
           Stop-Website -Name $env:SITE_NAME -ErrorAction SilentlyContinue
           Stop-WebAppPool -Name $appPoolName -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 3   # give WAS a moment to settle after stopping
 
           try {
             # 4. Deploy new build, mirroring the folder but excluding web.config entirely
@@ -106,15 +127,15 @@ jobs:
             Write-Host "Deployment failed: $_"
             Write-Host "Rolling back to backup at $backupFolder ..."
             robocopy $backupFolder $env:WEBSITE_PATH /MIR /XF web.config /NFL /NDL /NJH /NJS /NC /NS
-            Start-WebAppPool -Name $appPoolName -ErrorAction SilentlyContinue
-            Start-Website -Name $env:SITE_NAME -ErrorAction SilentlyContinue
+            Start-IISObjectWithRetry -Action { Start-WebAppPool -Name $appPoolName } -Description "start app pool '$appPoolName' after rollback"
+            Start-IISObjectWithRetry -Action { Start-Website -Name $env:SITE_NAME } -Description "start site '$($env:SITE_NAME)' after rollback"
             throw "Deployment failed and was rolled back. See error above."
           }
 
-          # 5. Start the app pool and site again
+          # 5. Start the app pool and site again (with retry in case WAS isn't immediately ready)
           Write-Host "Starting app pool $appPoolName and site $env:SITE_NAME..."
-          Start-WebAppPool -Name $appPoolName
-          Start-Website -Name $env:SITE_NAME
+          Start-IISObjectWithRetry -Action { Start-WebAppPool -Name $appPoolName } -Description "start app pool '$appPoolName'"
+          Start-IISObjectWithRetry -Action { Start-Website -Name $env:SITE_NAME } -Description "start site '$($env:SITE_NAME)'"
 
           Write-Host "Deployment complete."
           exit 0
