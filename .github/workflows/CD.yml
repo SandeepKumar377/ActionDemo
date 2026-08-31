@@ -1,4 +1,4 @@
-name: CD - deploy IIS
+name: CD - Deploy IIS
 
 on:
   workflow_run:
@@ -11,6 +11,7 @@ on:
 
 permissions:
   contents: read
+  actions: read             # required to download an artifact from another workflow run
 
 jobs:
   deploy:
@@ -25,19 +26,33 @@ jobs:
     environment: Development
 
     steps:
+      # --- Path A: triggered automatically after CI succeeds -> reuse CI's build artifact ---
+      - name: Download build artifact from CI run
+        if: github.event_name == 'workflow_run'
+        uses: actions/download-artifact@v4
+        with:
+          name: angular-build
+          path: dist/your-app-name   # match the same outputPath used in CI
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # --- Path B: triggered manually with no CI run to pull from -> rebuild from source ---
       - name: Checkout code
+        if: github.event_name == 'workflow_dispatch'
         uses: actions/checkout@v4
 
       - name: Setup Node.js
+        if: github.event_name == 'workflow_dispatch'
         uses: actions/setup-node@v4
         with:
-          node-version: '22.22.0'   # Angular 21 requires Node 22.22.0+ (or 24.13.1+)
-          cache: 'npm'
+          node-version: '22.22.0'
 
       - name: Install dependencies
+        if: github.event_name == 'workflow_dispatch'
         run: npm ci
 
       - name: Build Angular app
+        if: github.event_name == 'workflow_dispatch'
         run: npm run build
 
       - name: Backup current site, deploy new build, keep web.config
@@ -53,7 +68,7 @@ jobs:
           # Adjust "your-app-name" to match the "outputPath" folder name in angular.json
           $buildOutput = "dist\your-app-name"
 
-          # Fail fast if the build didn't actually produce output
+          # Fail fast if the build output isn't there (covers both artifact download and rebuild paths)
           if (-not (Test-Path $buildOutput) -or (Get-ChildItem $buildOutput -Recurse -File | Measure-Object).Count -eq 0) {
             throw "Build output '$buildOutput' is missing or empty - aborting before touching the live site."
           }
