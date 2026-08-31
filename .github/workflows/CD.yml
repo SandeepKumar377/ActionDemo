@@ -8,6 +8,14 @@ on:
     branches:
       - main
   workflow_dispatch:         # allows manually triggering a deployment
+    inputs:
+      run_id:
+        description: 'CI Run ID to deploy (copy from the CI job summary)'
+        required: true
+      artifact_name:
+        description: 'Artifact name to deploy'
+        required: true
+        default: 'angular-build'
 
 permissions:
   contents: read
@@ -25,35 +33,19 @@ jobs:
     # Change "Development" to whatever your GitHub Environment is actually named
     environment: Development
 
+    env:
+      # Resolve run id / artifact name based on how CD was triggered
+      DEPLOY_RUN_ID: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.id || inputs.run_id }}
+      DEPLOY_ARTIFACT_NAME: ${{ github.event_name == 'workflow_run' && 'angular-build' || inputs.artifact_name }}
+
     steps:
-      # --- Path A: triggered automatically after CI succeeds -> reuse CI's build artifact ---
-      - name: Download build artifact from CI run
-        if: github.event_name == 'workflow_run'
+      - name: Download build artifact
         uses: actions/download-artifact@v4
         with:
-          name: angular-build
+          name: ${{ env.DEPLOY_ARTIFACT_NAME }}
           path: ${{ vars.BUILD_OUTPUT_PATH }}
-          run-id: ${{ github.event.workflow_run.id }}
+          run-id: ${{ env.DEPLOY_RUN_ID }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
-
-      # --- Path B: triggered manually with no CI run to pull from -> rebuild from source ---
-      - name: Checkout code
-        if: github.event_name == 'workflow_dispatch'
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        if: github.event_name == 'workflow_dispatch'
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22.22.0'
-
-      - name: Install dependencies
-        if: github.event_name == 'workflow_dispatch'
-        run: npm ci
-
-      - name: Build Angular app
-        if: github.event_name == 'workflow_dispatch'
-        run: npm run build
 
       - name: Backup current site, deploy new build, keep web.config
         shell: powershell
@@ -68,7 +60,7 @@ jobs:
 
           $buildOutput = $env:BUILD_OUTPUT_PATH
 
-          # Fail fast if the build output isn't there (covers both artifact download and rebuild paths)
+          # Fail fast if the downloaded artifact isn't there
           if (-not (Test-Path $buildOutput) -or (Get-ChildItem $buildOutput -Recurse -File | Measure-Object).Count -eq 0) {
             throw "Build output '$buildOutput' is missing or empty - aborting before touching the live site."
           }
@@ -123,3 +115,22 @@ jobs:
           Start-Website -Name $env:SITE_NAME
 
           Write-Host "Deployment complete."
+
+      - name: Deployment summary
+        shell: pwsh
+        run: |
+          $trigger = "${{ github.event_name }}"
+          $commit = if ($trigger -eq "workflow_run") { "${{ github.event.workflow_run.head_sha }}" } else { "${{ github.sha }}" }
+          $branch = if ($trigger -eq "workflow_run") { "${{ github.event.workflow_run.head_branch }}" } else { "${{ github.ref_name }}" }
+
+          "## Deployment Summary" >> $env:GITHUB_STEP_SUMMARY
+          "" >> $env:GITHUB_STEP_SUMMARY
+          "| Field | Value |" >> $env:GITHUB_STEP_SUMMARY
+          "|---|---|" >> $env:GITHUB_STEP_SUMMARY
+          "| Site | ${{ vars.SITE_NAME }} |" >> $env:GITHUB_STEP_SUMMARY
+          "| Artifact | ${{ env.DEPLOY_ARTIFACT_NAME }} |" >> $env:GITHUB_STEP_SUMMARY
+          "| Source Run ID | ${{ env.DEPLOY_RUN_ID }} |" >> $env:GITHUB_STEP_SUMMARY
+          "| Commit | $commit |" >> $env:GITHUB_STEP_SUMMARY
+          "| Branch | $branch |" >> $env:GITHUB_STEP_SUMMARY
+          "| Actor | ${{ github.actor }} |" >> $env:GITHUB_STEP_SUMMARY
+          "| Trigger | $trigger |" >> $env:GITHUB_STEP_SUMMARY
