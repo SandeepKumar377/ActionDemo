@@ -111,8 +111,24 @@ jobs:
 
           # 3. Stop the site and its app pool before replacing files (releases file locks)
           Write-Host "Stopping site $env:SITE_NAME and app pool $appPoolName..."
-          Stop-Website -Name $env:SITE_NAME -ErrorAction SilentlyContinue
-          Stop-WebAppPool -Name $appPoolName -ErrorAction SilentlyContinue
+          try {
+            if ((Get-Website -Name $env:SITE_NAME).State -ne "Stopped") {
+              Stop-Website -Name $env:SITE_NAME
+            } else {
+              Write-Host "Site '$($env:SITE_NAME)' is already stopped."
+            }
+          } catch {
+            Write-Host "Could not stop site (continuing anyway): $_"
+          }
+          try {
+            if ((Get-WebAppPoolState -Name $appPoolName).Value -ne "Stopped") {
+              Stop-WebAppPool -Name $appPoolName
+            } else {
+              Write-Host "App pool '$appPoolName' is already stopped."
+            }
+          } catch {
+            Write-Host "Could not stop app pool (continuing anyway): $_"
+          }
           Start-Sleep -Seconds 3   # give WAS a moment to settle after stopping
 
           try {
