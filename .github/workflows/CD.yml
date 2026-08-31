@@ -117,7 +117,7 @@ jobs:
           Write-Host "Deployment complete."
 
       - name: Deployment summary
-        shell: pwsh
+        shell: powershell
         run: |
           $trigger = "${{ github.event_name }}"
           $commit = if ($trigger -eq "workflow_run") { "${{ github.event.workflow_run.head_sha }}" } else { "${{ github.sha }}" }
