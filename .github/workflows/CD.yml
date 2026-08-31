@@ -1,4 +1,4 @@
-name: CD - Deploy IIS
+name: CD -Deploy IIS
 
 on:
   workflow_run:
@@ -73,6 +73,7 @@ jobs:
           New-Item -ItemType Directory -Path $backupFolder -Force | Out-Null
           robocopy $env:WEBSITE_PATH $backupFolder /E /NFL /NDL /NJH /NJS /NC /NS
           if ($LASTEXITCODE -ge 8) { throw "Backup robocopy failed with exit code $LASTEXITCODE" }
+          $global:LASTEXITCODE = 0   # robocopy codes 0-7 are success; clear so it doesn't leak into the step's exit code
           Write-Host "Backup complete."
 
           # 2. Keep only the latest 5 backups for this site, delete older ones
@@ -99,6 +100,7 @@ jobs:
             Write-Host "Deploying new build to $env:WEBSITE_PATH ..."
             robocopy $buildOutput $env:WEBSITE_PATH /MIR /XF web.config /NFL /NDL /NJH /NJS /NC /NS
             if ($LASTEXITCODE -ge 8) { throw "Deployment robocopy failed with exit code $LASTEXITCODE" }
+            $global:LASTEXITCODE = 0   # robocopy codes 0-7 are success; clear so it doesn't leak into the step's exit code
           }
           catch {
             Write-Host "Deployment failed: $_"
@@ -115,6 +117,7 @@ jobs:
           Start-Website -Name $env:SITE_NAME
 
           Write-Host "Deployment complete."
+          exit 0
 
       - name: Deployment summary
         shell: powershell
