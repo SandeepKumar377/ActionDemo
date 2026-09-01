@@ -1,0 +1,79 @@
+name: CD - Deploy Production (Firebase)
+
+on:
+  workflow_dispatch: # Production is manual-only, never automatic off a CI run
+    inputs:
+      run_id:
+        description: 'CI Run ID to deploy (copy from the CI job summary)'
+        required: true
+      artifact_name:
+        description: 'Artifact name to deploy (leave blank to use angular-build-production)'
+        required: false
+
+permissions:
+  contents: read
+  actions: read # required to download an artifact from another workflow run
+
+jobs:
+  deploy-firebase:
+    runs-on: self-hosted
+    timeout-minutes: 15
+    environment: Production
+
+    env:
+      DEPLOY_ARTIFACT_NAME: ${{ inputs.artifact_name != '' && inputs.artifact_name || 'angular-build-production' }}
+
+    steps:
+      # Required so firebase.json / .firebaserc on the runner always match
+      # the current main branch - without this, a missing or stale
+      # firebase.json is the most common cause of a Firebase 404.
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.DEPLOY_ARTIFACT_NAME }}
+          path: ${{ vars.BUILD_OUTPUT_PATH }}
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fail fast if build output is empty
+        shell: powershell
+        env:
+          BUILD_OUTPUT_PATH: ${{ vars.BUILD_OUTPUT_PATH }}
+        run: |
+          $buildOutput = $env:BUILD_OUTPUT_PATH
+          if (-not (Test-Path $buildOutput) -or (Get-ChildItem $buildOutput -Recurse -File | Measure-Object).Count -eq 0) {
+            throw "Build output '$buildOutput' is missing or empty - aborting deploy."
+          }
+          Write-Host "Build output verified at $buildOutput"
+
+      # firebase.json's "hosting.public" must match vars.BUILD_OUTPUT_PATH exactly
+      - name: Deploy to Firebase Hosting
+        id: deploy
+        uses: FirebaseExtended/action-hosting-deploy@v0
+        with:
+          repoToken: ${{ secrets.GITHUB_TOKEN }}
+          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          projectId: ${{ vars.FIREBASE_PROJECT_ID }}
+          channelId: live
+          entryPoint: '.'
+
+      - name: Deployment summary
+        shell: powershell
+        env:
+          SITE_URL: ${{ steps.deploy.outputs.details_url }}
+        run: |
+          "## Deployment Summary (Production - Firebase)" >> $env:GITHUB_STEP_SUMMARY
+          "" >> $env:GITHUB_STEP_SUMMARY
+          "| Field | Value |" >> $env:GITHUB_STEP_SUMMARY
+          "|---|---|" >> $env:GITHUB_STEP_SUMMARY
+          "| Firebase Project | ${{ vars.FIREBASE_PROJECT_ID }} |" >> $env:GITHUB_STEP_SUMMARY
+          "| Site URL | [$env:SITE_URL]($env:SITE_URL) |" >> $env:GITHUB_STEP_SUMMARY
+          "| Artifact | ${{ env.DEPLOY_ARTIFACT_NAME }} |" >> $env:GITHUB_STEP_SUMMARY
+          "| Source Run ID | ${{ inputs.run_id }} |" >> $env:GITHUB_STEP_SUMMARY
+          "| Commit | ${{ github.sha }} |" >> $env:GITHUB_STEP_SUMMARY
+          "| Branch | ${{ github.ref_name }} |" >> $env:GITHUB_STEP_SUMMARY
+          "| Actor | ${{ github.actor }} |" >> $env:GITHUB_STEP_SUMMARY
+          "| Trigger | workflow_dispatch |" >> $env:GITHUB_STEP_SUMMARY

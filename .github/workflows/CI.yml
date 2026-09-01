@@ -13,13 +13,9 @@ permissions:
   contents: read
 
 jobs:
-  build-development:
+  build:
     runs-on: self-hosted
-    timeout-minutes: 15
-
-    # Uses the "Development" GitHub Environment, which must define a
-    # BUILD_OUTPUT_PATH variable (e.g. dist/development)
-    environment: Development
+    timeout-minutes: 20
 
     steps:
       - name: Checkout code
@@ -30,77 +26,53 @@ jobs:
         with:
           node-version: '22.22.0' # Angular 21 requires Node 22.22.0+ (or 24.13.1+)
 
-      - name: Install dependencies
+      - name: Install dependencies (once, shared by both builds)
         run: npm ci
 
+      # ---------------------------------------------------------------
+      # Development build
+      # ---------------------------------------------------------------
       - name: Build Angular app (development configuration)
         run: npm run build -- --configuration=development
 
-      - name: Fail fast if build output is empty
+      - name: Fail fast if development build output is empty
         shell: powershell
-        env:
-          BUILD_OUTPUT_PATH: ${{ vars.BUILD_OUTPUT_PATH }}
         run: |
-          $buildOutput = $env:BUILD_OUTPUT_PATH
+          $buildOutput = "dist/development"
           if (-not (Test-Path $buildOutput) -or (Get-ChildItem $buildOutput -Recurse -File | Measure-Object).Count -eq 0) {
             throw "Build output '$buildOutput' is missing or empty - failing CI."
           }
           Write-Host "Build output verified at $buildOutput"
 
-      - name: Upload build artifact
+      - name: Upload development build artifact
         uses: actions/upload-artifact@v4
         with:
           name: angular-build-development
-          path: ${{ vars.BUILD_OUTPUT_PATH }}
+          path: dist/development
           retention-days: 5
 
-  build-production:
-    runs-on: self-hosted
-    timeout-minutes: 15
-
-    # Uses the "Production" GitHub Environment, which must define a
-    # BUILD_OUTPUT_PATH variable (e.g. dist/production), separate from
-    # Development's so the two builds don't overwrite each other
-    environment: Production
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22.22.0' # Angular 21 requires Node 22.22.0+ (or 24.13.1+)
-
-      - name: Install dependencies
-        run: npm ci
-
+      # ---------------------------------------------------------------
+      # Production build
+      # ---------------------------------------------------------------
       - name: Build Angular app (production configuration)
         run: npm run build -- --configuration=production
 
-      - name: Fail fast if build output is empty
+      - name: Fail fast if production build output is empty
         shell: powershell
-        env:
-          BUILD_OUTPUT_PATH: ${{ vars.BUILD_OUTPUT_PATH }}
         run: |
-          $buildOutput = $env:BUILD_OUTPUT_PATH
+          $buildOutput = "dist/production"
           if (-not (Test-Path $buildOutput) -or (Get-ChildItem $buildOutput -Recurse -File | Measure-Object).Count -eq 0) {
             throw "Build output '$buildOutput' is missing or empty - failing CI."
           }
           Write-Host "Build output verified at $buildOutput"
 
-      - name: Upload build artifact
+      - name: Upload production build artifact
         uses: actions/upload-artifact@v4
         with:
           name: angular-build-production
-          path: ${{ vars.BUILD_OUTPUT_PATH }}
+          path: dist/production
           retention-days: 5
 
-  summary:
-    needs: [build-development, build-production]
-    runs-on: self-hosted
-    if: always()
-    steps:
       - name: CI summary
         shell: powershell
         run: |
@@ -109,12 +81,12 @@ jobs:
           "| Field | Value |" >> $env:GITHUB_STEP_SUMMARY
           "|---|---|" >> $env:GITHUB_STEP_SUMMARY
           "| Application | ${{ github.event.repository.name }} |" >> $env:GITHUB_STEP_SUMMARY
-          "| Development build | ${{ needs.build-development.result }} (artifact: angular-build-development) |" >> $env:GITHUB_STEP_SUMMARY
-          "| Production build | ${{ needs.build-production.result }} (artifact: angular-build-production) |" >> $env:GITHUB_STEP_SUMMARY
+          "| Development artifact | angular-build-development |" >> $env:GITHUB_STEP_SUMMARY
+          "| Production artifact | angular-build-production |" >> $env:GITHUB_STEP_SUMMARY
           "| Run ID | ${{ github.run_id }} |" >> $env:GITHUB_STEP_SUMMARY
           "| Run Number | ${{ github.run_number }} |" >> $env:GITHUB_STEP_SUMMARY
           "| Commit | ${{ github.sha }} |" >> $env:GITHUB_STEP_SUMMARY
           "| Branch | ${{ github.ref_name }} |" >> $env:GITHUB_STEP_SUMMARY
           "| Actor | ${{ github.actor }} |" >> $env:GITHUB_STEP_SUMMARY
           "" >> $env:GITHUB_STEP_SUMMARY
-          "> To deploy manually via CD, use **Run ID: ${{ github.run_id }}** with **Environment: Development** (artifact angular-build-development) or **Environment: Production** (artifact angular-build-production)" >> $env:GITHUB_STEP_SUMMARY
+          "> To deploy manually, use **Run ID: ${{ github.run_id }}** with the Development/Staging CD workflow or the Production (Firebase) CD workflow" >> $env:GITHUB_STEP_SUMMARY

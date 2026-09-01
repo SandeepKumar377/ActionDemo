@@ -1,4 +1,4 @@
-name: CD - Deploy
+name: CD - Deploy Development/Stage (IIS)
 
 on:
   workflow_run:
@@ -15,36 +15,33 @@ on:
         type: choice
         options:
           - Development
-          - Production
+          - Stage
         default: Development
       run_id:
         description: 'CI Run ID to deploy (copy from the CI job summary)'
         required: true
-      artifact_name:
-        description: 'Artifact name to deploy (leave blank to use the default for the chosen environment)'
-        required: false
 
 permissions:
   contents: read
   actions: read # required to download an artifact from another workflow run
 
 jobs:
-  # ---------------------------------------------------------------------
-  # Development -> IIS
-  # Runs automatically after a successful CI run on main, or manually
-  # when "Development" is chosen in workflow_dispatch.
-  # ---------------------------------------------------------------------
-  deploy-iis:
+  deploy:
+    # Auto-trigger (after CI) always targets Development.
+    # Manual trigger lets you pick Development or Stage.
     if: >
       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') ||
-      (github.event_name == 'workflow_dispatch' && inputs.environment == 'Development')
+      github.event_name == 'workflow_dispatch'
     runs-on: self-hosted
     timeout-minutes: 15
-    environment: Development
+
+    # Both Development and Stage deploy the same (non-optimized) build,
+    # just to different IIS sites - resolved dynamically from the input.
+    environment: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'Development' }}
 
     env:
       DEPLOY_RUN_ID: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.id || inputs.run_id }}
-      DEPLOY_ARTIFACT_NAME: ${{ (github.event_name == 'workflow_dispatch' && inputs.artifact_name != '') && inputs.artifact_name || 'angular-build-development' }}
+      DEPLOY_ARTIFACT_NAME: angular-build-development
 
     steps:
       - name: Download build artifact
@@ -195,13 +192,15 @@ jobs:
         shell: powershell
         run: |
           $trigger = "${{ github.event_name }}"
+          $envName = "${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'Development' }}"
           $commit = if ($trigger -eq "workflow_run") { "${{ github.event.workflow_run.head_sha }}" } else { "${{ github.sha }}" }
           $branch = if ($trigger -eq "workflow_run") { "${{ github.event.workflow_run.head_branch }}" } else { "${{ github.ref_name }}" }
 
-          "## Deployment Summary (IIS - Development)" >> $env:GITHUB_STEP_SUMMARY
+          "## Deployment Summary ($envName - IIS)" >> $env:GITHUB_STEP_SUMMARY
           "" >> $env:GITHUB_STEP_SUMMARY
           "| Field | Value |" >> $env:GITHUB_STEP_SUMMARY
           "|---|---|" >> $env:GITHUB_STEP_SUMMARY
+          "| Environment | $envName |" >> $env:GITHUB_STEP_SUMMARY
           "| Site | ${{ vars.SITE_NAME }} |" >> $env:GITHUB_STEP_SUMMARY
           "| Site URL | [${{ vars.SITE_URL }}](${{ vars.SITE_URL }}) |" >> $env:GITHUB_STEP_SUMMARY
           "| Artifact | ${{ env.DEPLOY_ARTIFACT_NAME }} |" >> $env:GITHUB_STEP_SUMMARY
@@ -210,64 +209,3 @@ jobs:
           "| Branch | $branch |" >> $env:GITHUB_STEP_SUMMARY
           "| Actor | ${{ github.actor }} |" >> $env:GITHUB_STEP_SUMMARY
           "| Trigger | $trigger |" >> $env:GITHUB_STEP_SUMMARY
-
-  # ---------------------------------------------------------------------
-  # Production -> Firebase Hosting
-  # Only runs when explicitly chosen via workflow_dispatch - never
-  # triggered automatically off a CI run.
-  # ---------------------------------------------------------------------
-  deploy-firebase:
-    if: github.event_name == 'workflow_dispatch' && inputs.environment == 'Production'
-    runs-on: self-hosted
-    timeout-minutes: 15
-    environment: Production
-
-    env:
-      DEPLOY_RUN_ID: ${{ inputs.run_id }}
-      DEPLOY_ARTIFACT_NAME: ${{ inputs.artifact_name != '' && inputs.artifact_name || 'angular-build-production' }}
-
-    steps:
-      - name: Download build artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ env.DEPLOY_ARTIFACT_NAME }}
-          path: ${{ vars.BUILD_OUTPUT_PATH }}
-          run-id: ${{ env.DEPLOY_RUN_ID }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Fail fast if build output is empty
-        shell: powershell
-        env:
-          BUILD_OUTPUT_PATH: ${{ vars.BUILD_OUTPUT_PATH }}
-        run: |
-          $buildOutput = $env:BUILD_OUTPUT_PATH
-          if (-not (Test-Path $buildOutput) -or (Get-ChildItem $buildOutput -Recurse -File | Measure-Object).Count -eq 0) {
-            throw "Build output '$buildOutput' is missing or empty - aborting deploy."
-          }
-          Write-Host "Build output verified at $buildOutput"
-
-      # Requires firebase.json / .firebaserc committed at the repo root,
-      # pointing "hosting.public" at the same folder as vars.BUILD_OUTPUT_PATH
-      - name: Deploy to Firebase Hosting
-        uses: FirebaseExtended/action-hosting-deploy@v0
-        with:
-          repoToken: ${{ secrets.GITHUB_TOKEN }}
-          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
-          projectId: ${{ vars.FIREBASE_PROJECT_ID }}
-          channelId: live
-          entryPoint: '.'
-
-      - name: Deployment summary
-        shell: powershell
-        run: |
-          "## Deployment Summary (Firebase - Production)" >> $env:GITHUB_STEP_SUMMARY
-          "" >> $env:GITHUB_STEP_SUMMARY
-          "| Field | Value |" >> $env:GITHUB_STEP_SUMMARY
-          "|---|---|" >> $env:GITHUB_STEP_SUMMARY
-          "| Firebase Project | ${{ vars.FIREBASE_PROJECT_ID }} |" >> $env:GITHUB_STEP_SUMMARY
-          "| Artifact | ${{ env.DEPLOY_ARTIFACT_NAME }} |" >> $env:GITHUB_STEP_SUMMARY
-          "| Source Run ID | ${{ env.DEPLOY_RUN_ID }} |" >> $env:GITHUB_STEP_SUMMARY
-          "| Commit | ${{ github.sha }} |" >> $env:GITHUB_STEP_SUMMARY
-          "| Branch | ${{ github.ref_name }} |" >> $env:GITHUB_STEP_SUMMARY
-          "| Actor | ${{ github.actor }} |" >> $env:GITHUB_STEP_SUMMARY
-          "| Trigger | workflow_dispatch |" >> $env:GITHUB_STEP_SUMMARY
