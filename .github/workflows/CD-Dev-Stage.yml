@@ -2,12 +2,12 @@ name: CD - Deploy Development/Stage (IIS)
 
 on:
   workflow_run:
-    workflows: ['CI'] # runs after the CI workflow finishes
+    workflows: ["CI"]        # runs after the CI workflow finishes
     types:
       - completed
     branches:
       - main
-  workflow_dispatch: # allows manually triggering a deployment
+  workflow_dispatch:         # allows manually triggering a deployment
     inputs:
       environment:
         description: 'Target environment to deploy'
@@ -20,10 +20,14 @@ on:
       run_id:
         description: 'CI Run ID to deploy (copy from the CI job summary)'
         required: true
+      artifact_name:
+        description: 'Artifact name to deploy'
+        required: true
+        default: angular-build-development
 
 permissions:
   contents: read
-  actions: read # required to download an artifact from another workflow run
+  actions: read             # required to download an artifact from another workflow run
 
 jobs:
   deploy:
@@ -41,7 +45,7 @@ jobs:
 
     env:
       DEPLOY_RUN_ID: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.id || inputs.run_id }}
-      DEPLOY_ARTIFACT_NAME: angular-build-development
+      DEPLOY_ARTIFACT_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.artifact_name || 'angular-build-development' }}
 
     steps:
       - name: Download build artifact

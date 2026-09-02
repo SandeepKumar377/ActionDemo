@@ -3,12 +3,20 @@ name: CD - Deploy Production (Firebase)
 on:
   workflow_dispatch: # Production is manual-only, never automatic off a CI run
     inputs:
+      environment:
+        description: 'Target environment to deploy'
+        required: true
+        type: choice
+        options:
+          - Production
+        default: Production
       run_id:
         description: 'CI Run ID to deploy (copy from the CI job summary)'
         required: true
       artifact_name:
-        description: 'Artifact name to deploy (leave blank to use angular-build-production)'
-        required: false
+        description: 'Artifact name to deploy'
+        required: true
+        default: angular-build-production
 
 permissions:
   contents: read
@@ -21,7 +29,7 @@ jobs:
     environment: Production
 
     env:
-      DEPLOY_ARTIFACT_NAME: ${{ inputs.artifact_name != '' && inputs.artifact_name || 'angular-build-production' }}
+      DEPLOY_ARTIFACT_NAME: ${{ inputs.artifact_name }}
 
     steps:
       # Required so firebase.json / .firebaserc on the runner always match
@@ -62,15 +70,13 @@ jobs:
 
       - name: Deployment summary
         shell: powershell
-        env:
-          SITE_URL: ${{ steps.deploy.outputs.details_url }}
         run: |
           "## Deployment Summary (Production - Firebase)" >> $env:GITHUB_STEP_SUMMARY
           "" >> $env:GITHUB_STEP_SUMMARY
           "| Field | Value |" >> $env:GITHUB_STEP_SUMMARY
           "|---|---|" >> $env:GITHUB_STEP_SUMMARY
           "| Firebase Project | ${{ vars.FIREBASE_PROJECT_ID }} |" >> $env:GITHUB_STEP_SUMMARY
-          "| Site URL | [$env:SITE_URL]($env:SITE_URL) |" >> $env:GITHUB_STEP_SUMMARY
+          "| Site URL | [${{ vars.SITE_URL }}](${{ vars.SITE_URL }}) |" >> $env:GITHUB_STEP_SUMMARY
           "| Artifact | ${{ env.DEPLOY_ARTIFACT_NAME }} |" >> $env:GITHUB_STEP_SUMMARY
           "| Source Run ID | ${{ inputs.run_id }} |" >> $env:GITHUB_STEP_SUMMARY
           "| Commit | ${{ github.sha }} |" >> $env:GITHUB_STEP_SUMMARY

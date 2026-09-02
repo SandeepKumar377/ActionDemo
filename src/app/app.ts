@@ -11,8 +11,10 @@ import { environment } from '../environments/environment';
 export class App implements OnInit {
 
   private apiUrl = environment.apiBaseUrl + '/courses';
+
   //Signal state for courses
   courses = signal<any[]>([]);
+  environment = signal<boolean>(environment.production);
 
   constructor(private http: HttpClient) { }
 
