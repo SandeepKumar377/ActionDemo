@@ -38,7 +38,7 @@ jobs:
       # (e.g. Karma + ChromeHeadless, Jest, or Vitest). This assumes the
       # default Angular CLI "npm test" script with a headless launcher.
       - name: Run unit tests
-        run: npm test -- --watch=false --browsers=ChromeHeadless
+        run: npm test -- --watch=false
 
   build:
     needs: test
@@ -102,18 +102,26 @@ jobs:
           path: dist/production
           retention-days: 5
 
+  summary:
+    # Own job, not tied to build's success - runs no matter which upstream
+    # job (test or build) failed, so a summary always appears.
+    needs: [test, build]
+    if: always()
+    runs-on: self-hosted
+    steps:
       - name: CI summary
-        if: always()
         shell: powershell
         run: |
-          $status = "${{ job.status }}"
-          $icon = if ($status -eq "success") { "PASSED" } else { "FAILED" }
-          "## CI Build Summary - $icon" >> $env:GITHUB_STEP_SUMMARY
+          $testResult = "${{ needs.test.result }}"
+          $buildResult = "${{ needs.build.result }}"
+          $overall = if ($testResult -eq "success" -and $buildResult -eq "success") { "PASSED" } else { "FAILED" }
+          "## CI Build Summary - $overall" >> $env:GITHUB_STEP_SUMMARY
           "" >> $env:GITHUB_STEP_SUMMARY
           "| Field | Value |" >> $env:GITHUB_STEP_SUMMARY
           "|---|---|" >> $env:GITHUB_STEP_SUMMARY
           "| Application | ${{ github.event.repository.name }} |" >> $env:GITHUB_STEP_SUMMARY
-          "| Status | $status |" >> $env:GITHUB_STEP_SUMMARY
+          "| Test job | $testResult |" >> $env:GITHUB_STEP_SUMMARY
+          "| Build job | $buildResult |" >> $env:GITHUB_STEP_SUMMARY
           "| Development artifact | angular-build-development |" >> $env:GITHUB_STEP_SUMMARY
           "| Production artifact | angular-build-production |" >> $env:GITHUB_STEP_SUMMARY
           "| Run ID | ${{ github.run_id }} |" >> $env:GITHUB_STEP_SUMMARY
@@ -122,7 +130,11 @@ jobs:
           "| Branch | ${{ github.ref_name }} |" >> $env:GITHUB_STEP_SUMMARY
           "| Actor | ${{ github.actor }} |" >> $env:GITHUB_STEP_SUMMARY
           "" >> $env:GITHUB_STEP_SUMMARY
-          "> To deploy manually, use **Run ID: ${{ github.run_id }}** with the Development/Stage CD workflow or the Production (Firebase) CD workflow" >> $env:GITHUB_STEP_SUMMARY
+          if ("$overall" -eq "PASSED") {
+            "> To deploy manually, use **Run ID: ${{ github.run_id }}** with the Development/Stage CD workflow or the Production (Firebase) CD workflow" >> $env:GITHUB_STEP_SUMMARY
+          } else {
+            "> Test job: $testResult | Build job: $buildResult - fix the failing job before deploying" >> $env:GITHUB_STEP_SUMMARY
+          }
 
   notify:
     needs: [test, build]
