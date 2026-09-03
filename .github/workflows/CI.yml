@@ -1,4 +1,4 @@
-name: CI - Environment Neutral
+name: CI
 
 on:
   push:
@@ -12,8 +12,36 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  test:
+    runs-on: self-hosted
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.0' # Angular 21 requires Node 22.22.0+ (or 24.13.1+)
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # NOTE: adjust this command to match your actual test runner/config
+      # (e.g. Karma + ChromeHeadless, Jest, or Vitest). This assumes the
+      # default Angular CLI "npm test" script with a headless launcher.
+      - name: Run unit tests
+        run: npm test -- --watch=false --browsers=ChromeHeadless
+
   build:
+    needs: test
     runs-on: self-hosted
     timeout-minutes: 20
 
@@ -24,7 +52,8 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22.22.0' # Angular 21 requires Node 22.22.0+ (or 24.13.1+)
+          node-version: '22.22.0'
+          cache: 'npm'
 
       - name: Install dependencies (once, shared by both builds)
         run: npm ci
@@ -74,13 +103,17 @@ jobs:
           retention-days: 5
 
       - name: CI summary
+        if: always()
         shell: powershell
         run: |
-          "## CI Build Summary" >> $env:GITHUB_STEP_SUMMARY
+          $status = "${{ job.status }}"
+          $icon = if ($status -eq "success") { "PASSED" } else { "FAILED" }
+          "## CI Build Summary - $icon" >> $env:GITHUB_STEP_SUMMARY
           "" >> $env:GITHUB_STEP_SUMMARY
           "| Field | Value |" >> $env:GITHUB_STEP_SUMMARY
           "|---|---|" >> $env:GITHUB_STEP_SUMMARY
           "| Application | ${{ github.event.repository.name }} |" >> $env:GITHUB_STEP_SUMMARY
+          "| Status | $status |" >> $env:GITHUB_STEP_SUMMARY
           "| Development artifact | angular-build-development |" >> $env:GITHUB_STEP_SUMMARY
           "| Production artifact | angular-build-production |" >> $env:GITHUB_STEP_SUMMARY
           "| Run ID | ${{ github.run_id }} |" >> $env:GITHUB_STEP_SUMMARY
@@ -89,4 +122,30 @@ jobs:
           "| Branch | ${{ github.ref_name }} |" >> $env:GITHUB_STEP_SUMMARY
           "| Actor | ${{ github.actor }} |" >> $env:GITHUB_STEP_SUMMARY
           "" >> $env:GITHUB_STEP_SUMMARY
-          "> To deploy manually, use **Run ID: ${{ github.run_id }}** with the Development/Staging CD workflow or the Production (Firebase) CD workflow" >> $env:GITHUB_STEP_SUMMARY
+          "> To deploy manually, use **Run ID: ${{ github.run_id }}** with the Development/Stage CD workflow or the Production (Firebase) CD workflow" >> $env:GITHUB_STEP_SUMMARY
+
+  notify:
+    needs: [test, build]
+    if: always()
+    runs-on: self-hosted
+    steps:
+      - name: Send email notification
+        if: vars.CI_EMAIL_NOTIFICATIONS != 'false'
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_SERVER }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "[${{ github.repository }}] CI ${{ (needs.test.result == 'success' && needs.build.result == 'success') && 'PASSED' || 'FAILED' }} - Run #${{ github.run_number }}"
+          to: ${{ vars.NOTIFY_EMAIL_TO }}
+          from: GitHub Actions
+          body: |
+            Repository: ${{ github.repository }}
+            Workflow: ${{ github.workflow }}
+            Test job: ${{ needs.test.result }}
+            Build job: ${{ needs.build.result }}
+            Branch: ${{ github.ref_name }}
+            Commit: ${{ github.sha }}
+            Actor: ${{ github.actor }}
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

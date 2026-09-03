@@ -22,11 +22,22 @@ permissions:
   contents: read
   actions: read # required to download an artifact from another workflow run
 
+concurrency:
+  group: cd-prod-Production
+  cancel-in-progress: false
+
 jobs:
   deploy-firebase:
+    # Defense-in-depth: even though workflow_dispatch lets you pick a branch
+    # to run this workflow from, only allow the actual deploy to proceed
+    # from main. Combine this with restricting the Production Environment's
+    # "Deployment branches" to main in GitHub Settings for full enforcement.
+    if: github.ref == 'refs/heads/main'
     runs-on: self-hosted
     timeout-minutes: 15
-    environment: Production
+    environment:
+      name: Production
+      url: ${{ vars.SITE_URL }}
 
     env:
       DEPLOY_ARTIFACT_NAME: ${{ inputs.artifact_name }}
@@ -69,12 +80,16 @@ jobs:
           entryPoint: '.'
 
       - name: Deployment summary
+        if: always()
         shell: powershell
         run: |
-          "## Deployment Summary (Production - Firebase)" >> $env:GITHUB_STEP_SUMMARY
+          $status = "${{ job.status }}"
+          $label = if ($status -eq "success") { "SUCCEEDED" } else { "FAILED" }
+          "## Deployment Summary (Production - Firebase) - $label" >> $env:GITHUB_STEP_SUMMARY
           "" >> $env:GITHUB_STEP_SUMMARY
           "| Field | Value |" >> $env:GITHUB_STEP_SUMMARY
           "|---|---|" >> $env:GITHUB_STEP_SUMMARY
+          "| Status | $status |" >> $env:GITHUB_STEP_SUMMARY
           "| Firebase Project | ${{ vars.FIREBASE_PROJECT_ID }} |" >> $env:GITHUB_STEP_SUMMARY
           "| Site URL | [${{ vars.SITE_URL }}](${{ vars.SITE_URL }}) |" >> $env:GITHUB_STEP_SUMMARY
           "| Artifact | ${{ env.DEPLOY_ARTIFACT_NAME }} |" >> $env:GITHUB_STEP_SUMMARY
@@ -83,3 +98,30 @@ jobs:
           "| Branch | ${{ github.ref_name }} |" >> $env:GITHUB_STEP_SUMMARY
           "| Actor | ${{ github.actor }} |" >> $env:GITHUB_STEP_SUMMARY
           "| Trigger | workflow_dispatch |" >> $env:GITHUB_STEP_SUMMARY
+
+  notify:
+    needs: deploy-firebase
+    if: always()
+    runs-on: self-hosted
+    environment:
+      name: Production
+    steps:
+      - name: Send email notification
+        if: vars.EMAIL_NOTIFICATIONS != 'false'
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_SERVER }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "[${{ github.repository }}] Firebase deploy ${{ needs.deploy-firebase.result == 'success' && 'SUCCEEDED' || 'FAILED' }} - Run #${{ github.run_number }}"
+          to: ${{ vars.NOTIFY_EMAIL_TO }}
+          from: GitHub Actions
+          body: |
+            Repository: ${{ github.repository }}
+            Workflow: ${{ github.workflow }}
+            Deploy job: ${{ needs.deploy-firebase.result }}
+            Branch: ${{ github.ref_name }}
+            Commit: ${{ github.sha }}
+            Actor: ${{ github.actor }}
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
