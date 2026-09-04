@@ -89,6 +89,8 @@ jobs:
           "" >> $env:GITHUB_STEP_SUMMARY
           "| Field | Value |" >> $env:GITHUB_STEP_SUMMARY
           "|---|---|" >> $env:GITHUB_STEP_SUMMARY
+          "| Repository | ${{ github.repository }} |" >> $env:GITHUB_STEP_SUMMARY
+          "| Environment | Production |" >> $env:GITHUB_STEP_SUMMARY
           "| Status | $status |" >> $env:GITHUB_STEP_SUMMARY
           "| Firebase Project | ${{ vars.FIREBASE_PROJECT_ID }} |" >> $env:GITHUB_STEP_SUMMARY
           "| Site URL | [${{ vars.SITE_URL }}](${{ vars.SITE_URL }}) |" >> $env:GITHUB_STEP_SUMMARY
@@ -120,6 +122,8 @@ jobs:
           body: |
             Repository: ${{ github.repository }}
             Workflow: ${{ github.workflow }}
+            Environment: Production
+            Site URL: ${{ vars.SITE_URL }}
             Deploy job: ${{ needs.deploy-firebase.result }}
             Branch: ${{ github.ref_name }}
             Commit: ${{ github.sha }}
