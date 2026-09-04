@@ -1,4 +1,4 @@
-name: CI
+name: CI - Test & Build (Angular)
 
 on:
   push:
@@ -97,6 +97,7 @@ jobs:
           retention-days: 5
 
   summary:
+    name: CI Summary
     needs: build
     if: always()
     runs-on: self-hosted
