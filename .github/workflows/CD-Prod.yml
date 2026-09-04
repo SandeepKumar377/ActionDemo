@@ -28,6 +28,7 @@ concurrency:
 
 jobs:
   deploy-firebase:
+    name: Deploy to Firebase
     # Defense-in-depth: even though workflow_dispatch lets you pick a branch
     # to run this workflow from, only allow the actual deploy to proceed
     # from main. Combine this with restricting the Production Environment's
@@ -38,6 +39,10 @@ jobs:
     environment:
       name: Production
       url: ${{ vars.SITE_URL }}
+    outputs:
+      # NEW - exposes the env var to downstream jobs
+      email_notifications: ${{ vars.EMAIL_NOTIFICATIONS }}
+      site_url: ${{ vars.SITE_URL }}
 
     env:
       DEPLOY_ARTIFACT_NAME: ${{ inputs.artifact_name }}
@@ -102,14 +107,13 @@ jobs:
           "| Trigger | workflow_dispatch |" >> $env:GITHUB_STEP_SUMMARY
 
   notify:
+    name: Email Notification
     needs: deploy-firebase
     if: always()
     runs-on: self-hosted
-    environment:
-      name: Production
     steps:
       - name: Send email notification
-        if: vars.EMAIL_NOTIFICATIONS != 'false'
+        if: needs.deploy-firebase.outputs.email_notifications != 'false'
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: ${{ secrets.SMTP_SERVER }}
@@ -123,7 +127,7 @@ jobs:
             Repository: ${{ github.repository }}
             Workflow: ${{ github.workflow }}
             Environment: Production
-            Site URL: ${{ vars.SITE_URL }}
+            Site URL: ${{ needs.deploy-firebase.outputs.site_url }}
             Deploy job: ${{ needs.deploy-firebase.result }}
             Branch: ${{ github.ref_name }}
             Commit: ${{ github.sha }}

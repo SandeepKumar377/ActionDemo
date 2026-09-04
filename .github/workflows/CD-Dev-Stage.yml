@@ -34,6 +34,7 @@ concurrency:
 
 jobs:
   deploy:
+    name: Deploy to ${{ inputs.environment }}
     runs-on: self-hosted
     timeout-minutes: 15
 
@@ -212,6 +213,7 @@ jobs:
           "| Actor | ${{ github.actor }} |" >> $env:GITHUB_STEP_SUMMARY
 
   notify:
+    name: Email Notification
     needs: deploy
     if: always()
     runs-on: self-hosted

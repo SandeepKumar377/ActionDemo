@@ -18,6 +18,7 @@ concurrency:
 
 jobs:
   build:
+    name: Test & Build
     # Test + build merged into ONE job. `build` previously had `needs: test`,
     # meaning it only ever ran after test succeeded anyway - there was no
     # parallelism to lose. Merging removes the duplicate checkout / setup-node
@@ -126,9 +127,12 @@ jobs:
           if ("$overall" -eq "PASSED") {
             # Run ID / artifact names only matter if there's something
             # deployable - so only show them when CI actually passed.
-            "" >> $env:GITHUB_STEP_SUMMARY
-            "| Run ID | ${{ github.run_id }} |" >> $env:GITHUB_STEP_SUMMARY
+            # NOTE: no blank line before these rows - GFM only renders a
+            # table when header+separator are immediately followed by rows
+            # with nothing in between; a blank line breaks the table and
+            # these would render as literal "| a | b |" text instead.
             "| Run Number | ${{ github.run_number }} |" >> $env:GITHUB_STEP_SUMMARY
+            "| Run ID | ${{ github.run_id }} |" >> $env:GITHUB_STEP_SUMMARY
             "| Development artifact | angular-build-development |" >> $env:GITHUB_STEP_SUMMARY
             "| Production artifact | angular-build-production |" >> $env:GITHUB_STEP_SUMMARY
             "" >> $env:GITHUB_STEP_SUMMARY
@@ -139,6 +143,7 @@ jobs:
           }
 
   notify:
+    name: Email Notification
     needs: build
     if: always()
     runs-on: self-hosted
