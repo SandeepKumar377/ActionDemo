@@ -1,0 +1,171 @@
+name: CI - Test & Build (Angular)
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch: # allows manually running CI on demand
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Test & Build
+    # Test + build merged into ONE job. `build` previously had `needs: test`,
+    # meaning it only ever ran after test succeeded anyway - there was no
+    # parallelism to lose. Merging removes the duplicate checkout / setup-node
+    # / npm ci that ran once per job before.
+    runs-on: self-hosted
+    timeout-minutes: 20
+    outputs:
+      # Step outcomes, surfaced as job outputs so downstream jobs (summary,
+      # notify) can still report Test vs Build separately even though it's
+      # one job now. `outcome` (not `conclusion`) reflects the step's own
+      # pass/fail, ignoring continue-on-error settings.
+      test_result: ${{ steps.test.outcome }}
+      build_result: ${{ steps.build-prod-check.outcome }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.0' # Angular 21 requires Node 22.22.0+ (or 24.13.1+)
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run unit tests
+        id: test
+        run: npm test -- --watch=false
+
+      # ---------------------------------------------------------------
+      # Development build
+      # ---------------------------------------------------------------
+      - name: Build Angular app (development configuration)
+        run: npm run build -- --configuration=development
+
+      - name: Fail fast if development build output is empty
+        id: build-dev-check
+        shell: powershell
+        run: |
+          $buildOutput = "dist/development"
+          if (-not (Test-Path $buildOutput) -or (Get-ChildItem $buildOutput -Recurse -File | Measure-Object).Count -eq 0) {
+            throw "Build output '$buildOutput' is missing or empty - failing CI."
+          }
+          Write-Host "Build output verified at $buildOutput"
+
+      - name: Upload development build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: angular-build-development
+          path: dist/development
+          retention-days: 5
+
+      # ---------------------------------------------------------------
+      # Production build
+      # ---------------------------------------------------------------
+      - name: Build Angular app (production configuration)
+        run: npm run build -- --configuration=production
+
+      - name: Fail fast if production build output is empty
+        id: build-prod-check
+        shell: powershell
+        run: |
+          $buildOutput = "dist/production"
+          if (-not (Test-Path $buildOutput) -or (Get-ChildItem $buildOutput -Recurse -File | Measure-Object).Count -eq 0) {
+            throw "Build output '$buildOutput' is missing or empty - failing CI."
+          }
+          Write-Host "Build output verified at $buildOutput"
+
+      - name: Upload production build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: angular-build-production
+          path: dist/production
+          retention-days: 5
+
+  summary:
+    name: CI Summary
+    needs: build
+    if: always()
+    runs-on: self-hosted
+    steps:
+      - name: CI summary
+        shell: powershell
+        run: |
+          $testResult = "${{ needs.build.outputs.test_result }}"
+          $buildResult = "${{ needs.build.outputs.build_result }}"
+          # If the job died before a step ran (e.g. checkout failed), its
+          # output is blank - treat that as "skipped" for display purposes.
+          if ([string]::IsNullOrWhiteSpace($testResult)) { $testResult = "skipped" }
+          if ([string]::IsNullOrWhiteSpace($buildResult)) { $buildResult = "skipped" }
+          $overall = if ($testResult -eq "success" -and $buildResult -eq "success") { "PASSED" } else { "FAILED" }
+
+          "## CI Build Summary - $overall" >> $env:GITHUB_STEP_SUMMARY
+          "" >> $env:GITHUB_STEP_SUMMARY
+          "| Field | Value |" >> $env:GITHUB_STEP_SUMMARY
+          "|---|---|" >> $env:GITHUB_STEP_SUMMARY
+          "| Repository | ${{ github.repository }} |" >> $env:GITHUB_STEP_SUMMARY
+          "| Application | ${{ github.event.repository.name }} |" >> $env:GITHUB_STEP_SUMMARY
+          "| Test | $testResult |" >> $env:GITHUB_STEP_SUMMARY
+          "| Build | $buildResult |" >> $env:GITHUB_STEP_SUMMARY
+          "| Commit | ${{ github.sha }} |" >> $env:GITHUB_STEP_SUMMARY
+          "| Branch | ${{ github.ref_name }} |" >> $env:GITHUB_STEP_SUMMARY
+          "| Actor | ${{ github.actor }} |" >> $env:GITHUB_STEP_SUMMARY
+
+          if ("$overall" -eq "PASSED") {
+            # Run ID / artifact names only matter if there's something
+            # deployable - so only show them when CI actually passed.
+            # NOTE: no blank line before these rows - GFM only renders a
+            # table when header+separator are immediately followed by rows
+            # with nothing in between; a blank line breaks the table and
+            # these would render as literal "| a | b |" text instead.
+            "| Run Number | ${{ github.run_number }} |" >> $env:GITHUB_STEP_SUMMARY
+            "| Run ID | ${{ github.run_id }} |" >> $env:GITHUB_STEP_SUMMARY
+            "| Development artifact | angular-build-development |" >> $env:GITHUB_STEP_SUMMARY
+            "| Production artifact | angular-build-production |" >> $env:GITHUB_STEP_SUMMARY
+            "" >> $env:GITHUB_STEP_SUMMARY
+            "> To deploy manually, use **Run ID: ${{ github.run_id }}** with the Development/Stage CD workflow or the Production (Firebase) CD workflow" >> $env:GITHUB_STEP_SUMMARY
+          } else {
+            "" >> $env:GITHUB_STEP_SUMMARY
+            "> CI failed - fix the failing step before deploying. Run ID and artifact names aren't shown since there's nothing safe to deploy." >> $env:GITHUB_STEP_SUMMARY
+          }
+
+  notify:
+    name: Email Notification
+    needs: build
+    if: always()
+    runs-on: self-hosted
+    steps:
+      - name: Send email notification
+        if: vars.CI_EMAIL_NOTIFICATIONS != 'false'
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_SERVER }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "[${{ github.repository }}] CI ${{ (needs.build.outputs.test_result == 'success' && needs.build.outputs.build_result == 'success') && 'PASSED' || 'FAILED' }} - Run #${{ github.run_number }}"
+          to: ${{ vars.NOTIFY_EMAIL_TO }}
+          from: GitHub Actions
+          body: |
+            Repository: ${{ github.repository }}
+            Workflow: ${{ github.workflow }}
+            Test: ${{ needs.build.outputs.test_result }}
+            Build: ${{ needs.build.outputs.build_result }}
+            Branch: ${{ github.ref_name }}
+            Commit: ${{ github.sha }}
+            Actor: ${{ github.actor }}
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

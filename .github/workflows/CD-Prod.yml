@@ -1,0 +1,135 @@
+name: CD - Deploy Production (Firebase)
+
+on:
+  workflow_dispatch: # Production is manual-only, never automatic off a CI run
+    inputs:
+      environment:
+        description: 'Target environment to deploy'
+        required: true
+        type: choice
+        options:
+          - Production
+        default: Production
+      run_id:
+        description: 'CI Run ID to deploy (copy from the CI job summary)'
+        required: true
+      artifact_name:
+        description: 'Artifact name to deploy'
+        required: true
+        default: angular-build-production
+
+permissions:
+  contents: read
+  actions: read # required to download an artifact from another workflow run
+
+concurrency:
+  group: cd-prod-Production
+  cancel-in-progress: false
+
+jobs:
+  deploy-firebase:
+    name: Deploy to Firebase
+    # Defense-in-depth: even though workflow_dispatch lets you pick a branch
+    # to run this workflow from, only allow the actual deploy to proceed
+    # from main. Combine this with restricting the Production Environment's
+    # "Deployment branches" to main in GitHub Settings for full enforcement.
+    if: github.ref == 'refs/heads/main'
+    runs-on: self-hosted
+    timeout-minutes: 15
+    environment:
+      name: Production
+      url: ${{ vars.SITE_URL }}
+    outputs:
+      # NEW - exposes the env var to downstream jobs
+      email_notifications: ${{ vars.EMAIL_NOTIFICATIONS }}
+      site_url: ${{ vars.SITE_URL }}
+
+    env:
+      DEPLOY_ARTIFACT_NAME: ${{ inputs.artifact_name }}
+
+    steps:
+      # Required so firebase.json / .firebaserc on the runner always match
+      # the current main branch - without this, a missing or stale
+      # firebase.json is the most common cause of a Firebase 404.
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.DEPLOY_ARTIFACT_NAME }}
+          path: ${{ vars.BUILD_OUTPUT_PATH }}
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fail fast if build output is empty
+        shell: powershell
+        env:
+          BUILD_OUTPUT_PATH: ${{ vars.BUILD_OUTPUT_PATH }}
+        run: |
+          $buildOutput = $env:BUILD_OUTPUT_PATH
+          if (-not (Test-Path $buildOutput) -or (Get-ChildItem $buildOutput -Recurse -File | Measure-Object).Count -eq 0) {
+            throw "Build output '$buildOutput' is missing or empty - aborting deploy."
+          }
+          Write-Host "Build output verified at $buildOutput"
+
+      # firebase.json's "hosting.public" must match vars.BUILD_OUTPUT_PATH exactly
+      - name: Deploy to Firebase Hosting
+        id: deploy
+        uses: FirebaseExtended/action-hosting-deploy@v0
+        with:
+          repoToken: ${{ secrets.GITHUB_TOKEN }}
+          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          projectId: ${{ vars.FIREBASE_PROJECT_ID }}
+          channelId: live
+          entryPoint: '.'
+
+      - name: Deployment summary
+        if: always()
+        shell: powershell
+        run: |
+          $status = "${{ job.status }}"
+          $label = if ($status -eq "success") { "SUCCEEDED" } else { "FAILED" }
+          "## Deployment Summary (Production - Firebase) - $label" >> $env:GITHUB_STEP_SUMMARY
+          "" >> $env:GITHUB_STEP_SUMMARY
+          "| Field | Value |" >> $env:GITHUB_STEP_SUMMARY
+          "|---|---|" >> $env:GITHUB_STEP_SUMMARY
+          "| Repository | ${{ github.repository }} |" >> $env:GITHUB_STEP_SUMMARY
+          "| Environment | Production |" >> $env:GITHUB_STEP_SUMMARY
+          "| Status | $status |" >> $env:GITHUB_STEP_SUMMARY
+          "| Firebase Project | ${{ vars.FIREBASE_PROJECT_ID }} |" >> $env:GITHUB_STEP_SUMMARY
+          "| Site URL | [${{ vars.SITE_URL }}](${{ vars.SITE_URL }}) |" >> $env:GITHUB_STEP_SUMMARY
+          "| Artifact | ${{ env.DEPLOY_ARTIFACT_NAME }} |" >> $env:GITHUB_STEP_SUMMARY
+          "| Source Run ID | ${{ inputs.run_id }} |" >> $env:GITHUB_STEP_SUMMARY
+          "| Commit | ${{ github.sha }} |" >> $env:GITHUB_STEP_SUMMARY
+          "| Branch | ${{ github.ref_name }} |" >> $env:GITHUB_STEP_SUMMARY
+          "| Actor | ${{ github.actor }} |" >> $env:GITHUB_STEP_SUMMARY
+          "| Trigger | workflow_dispatch |" >> $env:GITHUB_STEP_SUMMARY
+
+  notify:
+    name: Email Notification
+    needs: deploy-firebase
+    if: always()
+    runs-on: self-hosted
+    steps:
+      - name: Send email notification
+        if: needs.deploy-firebase.outputs.email_notifications != 'false'
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_SERVER }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "[${{ github.repository }}] Firebase deploy ${{ needs.deploy-firebase.result == 'success' && 'SUCCEEDED' || 'FAILED' }} - Run #${{ github.run_number }}"
+          to: ${{ vars.NOTIFY_EMAIL_TO }}
+          from: GitHub Actions
+          body: |
+            Repository: ${{ github.repository }}
+            Workflow: ${{ github.workflow }}
+            Environment: Production
+            Site URL: ${{ needs.deploy-firebase.outputs.site_url }}
+            Deploy job: ${{ needs.deploy-firebase.result }}
+            Branch: ${{ github.ref_name }}
+            Commit: ${{ github.sha }}
+            Actor: ${{ github.actor }}
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

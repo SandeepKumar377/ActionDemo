@@ -1,0 +1,246 @@
+name: CD - Deploy Development/Stage (IIS)
+
+on:
+  # workflow_run trigger removed - deployment to Development is no longer
+  # automatic after CI succeeds. Every deploy (Development or Stage) is now
+  # a deliberate, manual action via workflow_dispatch, using a Run ID from
+  # a CI summary. This also lets you promote a specific, already-tested
+  # build without triggering a fresh CI run.
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment to deploy'
+        required: true
+        type: choice
+        options:
+          - Development
+          - Stage
+        default: Development
+      run_id:
+        description: 'CI Run ID to deploy (copy from the CI job summary)'
+        required: true
+      artifact_name:
+        description: 'Artifact name to deploy'
+        required: true
+        default: angular-build-development
+
+permissions:
+  contents: read
+  actions: read # required to download an artifact from another workflow run
+
+concurrency:
+  group: cd-dev-stage-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to ${{ inputs.environment }}
+    runs-on: self-hosted
+    timeout-minutes: 15
+
+    # Both Development and Stage deploy the same (non-optimized) build,
+    # just to different IIS sites - resolved dynamically from the input.
+    environment:
+      name: ${{ inputs.environment }}
+      url: ${{ vars.SITE_URL }}
+
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: ${{ vars.BUILD_OUTPUT_PATH }}
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Backup current site, deploy new build, keep web.config
+        shell: powershell
+        env:
+          SITE_NAME: ${{ vars.SITE_NAME }}
+          WEBSITE_PATH: ${{ vars.WEBSITE_PATH }}
+          BACKUP_PATH: ${{ vars.BACKUP_PATH }}
+          BUILD_OUTPUT_PATH: ${{ vars.BUILD_OUTPUT_PATH }}
+          SITE_URL: ${{ vars.SITE_URL }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          Import-Module WebAdministration
+
+          function Start-IISObjectWithRetry {
+            param(
+              [scriptblock]$Action,
+              [string]$Description,
+              [int]$MaxRetries = 5,
+              [int]$DelaySeconds = 3
+            )
+            for ($i = 1; $i -le $MaxRetries; $i++) {
+              try {
+                & $Action
+                Write-Host "$Description succeeded on attempt $i."
+                return
+              } catch {
+                Write-Host "Attempt $i to $Description failed: $_"
+                if ($i -eq $MaxRetries) { throw }
+                Start-Sleep -Seconds $DelaySeconds
+              }
+            }
+          }
+
+          $buildOutput = $env:BUILD_OUTPUT_PATH
+
+          # Fail fast if the downloaded artifact isn't there
+          if (-not (Test-Path $buildOutput) -or (Get-ChildItem $buildOutput -Recurse -File | Measure-Object).Count -eq 0) {
+            throw "Build output '$buildOutput' is missing or empty - aborting before touching the live site."
+          }
+
+          $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+          $backupFolder = Join-Path $env:BACKUP_PATH "$($env:SITE_NAME)_$timestamp"
+
+          # 1. Back up the currently deployed site
+          Write-Host "Backing up current site to $backupFolder ..."
+          New-Item -ItemType Directory -Path $backupFolder -Force | Out-Null
+          robocopy $env:WEBSITE_PATH $backupFolder /E /NFL /NDL /NJH /NJS /NC /NS
+          if ($LASTEXITCODE -ge 8) { throw "Backup robocopy failed with exit code $LASTEXITCODE" }
+          $global:LASTEXITCODE = 0   # robocopy codes 0-7 are success; clear so it doesn't leak into the step's exit code
+          Write-Host "Backup complete."
+
+          # 2. Keep only the latest 5 backups for this site, delete older ones
+          Write-Host "Cleaning up old backups (keeping latest 5)..."
+          Get-ChildItem -Path $env:BACKUP_PATH -Directory -Filter "$($env:SITE_NAME)_*" |
+            Sort-Object CreationTime -Descending |
+            Select-Object -Skip 5 |
+            ForEach-Object {
+              Write-Host "Removing old backup: $($_.FullName)"
+              Remove-Item -Path $_.FullName -Recurse -Force
+            }
+
+          # Find the app pool backing this site, so we can stop/start it alongside the site
+          $appPoolName = (Get-Website -Name $env:SITE_NAME).applicationPool
+
+          # 3. Stop the site and its app pool before replacing files (releases file locks)
+          Write-Host "Stopping site $env:SITE_NAME and app pool $appPoolName..."
+          try {
+            if ((Get-Website -Name $env:SITE_NAME).State -ne "Stopped") {
+              Stop-Website -Name $env:SITE_NAME
+            } else {
+              Write-Host "Site '$($env:SITE_NAME)' is already stopped."
+            }
+          } catch {
+            Write-Host "Could not stop site (continuing anyway): $_"
+          }
+          try {
+            if ((Get-WebAppPoolState -Name $appPoolName).Value -ne "Stopped") {
+              Stop-WebAppPool -Name $appPoolName
+            } else {
+              Write-Host "App pool '$appPoolName' is already stopped."
+            }
+          } catch {
+            Write-Host "Could not stop app pool (continuing anyway): $_"
+          }
+          Start-Sleep -Seconds 3   # give WAS a moment to settle after stopping
+
+          try {
+            # 4. Deploy new build, mirroring the folder but excluding web.config entirely
+            #    (existing web.config on the server is left untouched)
+            Write-Host "Deploying new build to $env:WEBSITE_PATH ..."
+            robocopy $buildOutput $env:WEBSITE_PATH /MIR /XF web.config /NFL /NDL /NJH /NJS /NC /NS
+            if ($LASTEXITCODE -ge 8) { throw "Deployment robocopy failed with exit code $LASTEXITCODE" }
+            $global:LASTEXITCODE = 0   # robocopy codes 0-7 are success; clear so it doesn't leak into the step's exit code
+
+            # 5. Start the app pool and site again (with retry in case WAS isn't immediately ready)
+            Write-Host "Starting app pool $appPoolName and site $env:SITE_NAME..."
+            Start-IISObjectWithRetry -Action { Start-WebAppPool -Name $appPoolName } -Description "start app pool '$appPoolName'"
+            Start-IISObjectWithRetry -Action { Start-Website -Name $env:SITE_NAME } -Description "start site '$($env:SITE_NAME)'"
+
+            # 6. Post-deploy health check - if the site doesn't respond OK, treat it as a failed deployment
+            if ([string]::IsNullOrWhiteSpace($env:SITE_URL)) {
+              Write-Host "SITE_URL not set - skipping health check."
+            } else {
+              Write-Host "Running post-deploy health check against $env:SITE_URL ..."
+              $healthy = $false
+              for ($i = 1; $i -le 5; $i++) {
+                try {
+                  $response = Invoke-WebRequest -Uri $env:SITE_URL -UseBasicParsing -TimeoutSec 15
+                  if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 400) {
+                    Write-Host "Health check passed on attempt $i (status $($response.StatusCode))."
+                    $healthy = $true
+                    break
+                  } else {
+                    Write-Host "Health check attempt $i got unexpected status $($response.StatusCode)."
+                  }
+                } catch {
+                  Write-Host "Health check attempt $i failed: $_"
+                }
+                Start-Sleep -Seconds 3
+              }
+              if (-not $healthy) {
+                throw "Post-deploy health check failed after 5 attempts - site did not respond successfully at $env:SITE_URL"
+              }
+            }
+          }
+          catch {
+            Write-Host "Deployment or health check failed: $_"
+            Write-Host "Rolling back to backup at $backupFolder ..."
+            robocopy $backupFolder $env:WEBSITE_PATH /MIR /XF web.config /NFL /NDL /NJH /NJS /NC /NS
+            Start-IISObjectWithRetry -Action { Start-WebAppPool -Name $appPoolName } -Description "start app pool '$appPoolName' after rollback"
+            Start-IISObjectWithRetry -Action { Start-Website -Name $env:SITE_NAME } -Description "start site '$($env:SITE_NAME)' after rollback"
+            throw "Deployment failed (build/copy or health check) and was rolled back. See error above."
+          }
+
+          Write-Host "Deployment complete."
+          exit 0
+
+      - name: Deployment summary
+        if: always()
+        shell: powershell
+        run: |
+          $envName = "${{ inputs.environment }}"
+          $status = "${{ job.status }}"
+          $label = if ($status -eq "success") { "SUCCEEDED" } else { "FAILED" }
+
+          "## Deployment Summary ($envName - IIS) - $label" >> $env:GITHUB_STEP_SUMMARY
+          "" >> $env:GITHUB_STEP_SUMMARY
+          "| Field | Value |" >> $env:GITHUB_STEP_SUMMARY
+          "|---|---|" >> $env:GITHUB_STEP_SUMMARY
+          "| Repository | ${{ github.repository }} |" >> $env:GITHUB_STEP_SUMMARY
+          "| Environment | $envName |" >> $env:GITHUB_STEP_SUMMARY
+          "| Status | $status |" >> $env:GITHUB_STEP_SUMMARY
+          "| Site | ${{ vars.SITE_NAME }} |" >> $env:GITHUB_STEP_SUMMARY
+          "| Site URL | [${{ vars.SITE_URL }}](${{ vars.SITE_URL }}) |" >> $env:GITHUB_STEP_SUMMARY
+          "| Artifact | ${{ inputs.artifact_name }} |" >> $env:GITHUB_STEP_SUMMARY
+          "| Source Run ID | ${{ inputs.run_id }} |" >> $env:GITHUB_STEP_SUMMARY
+          "| Commit | ${{ github.sha }} |" >> $env:GITHUB_STEP_SUMMARY
+          "| Branch | ${{ github.ref_name }} |" >> $env:GITHUB_STEP_SUMMARY
+          "| Actor | ${{ github.actor }} |" >> $env:GITHUB_STEP_SUMMARY
+
+  notify:
+    name: Email Notification
+    needs: deploy
+    if: always()
+    runs-on: self-hosted
+    # Bound to the same environment as the deploy job so it can read that
+    # environment's EMAIL_NOTIFICATIONS variable (Development/Stage each
+    # control this independently).
+    environment:
+      name: ${{ inputs.environment }}
+    steps:
+      - name: Send email notification
+        if: vars.EMAIL_NOTIFICATIONS != 'false'
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_SERVER }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "[${{ github.repository }}] IIS deploy (${{ inputs.environment }}) ${{ needs.deploy.result == 'success' && 'SUCCEEDED' || 'FAILED' }} - Run #${{ github.run_number }}"
+          to: ${{ vars.NOTIFY_EMAIL_TO }}
+          from: GitHub Actions
+          body: |
+            Repository: ${{ github.repository }}
+            Workflow: ${{ github.workflow }}
+            Environment: ${{ inputs.environment }}
+            Site URL: ${{ vars.SITE_URL }}
+            Deploy job: ${{ needs.deploy.result }}
+            Branch: ${{ github.ref_name }}
+            Commit: ${{ github.sha }}
+            Actor: ${{ github.actor }}
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
